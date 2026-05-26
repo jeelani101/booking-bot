@@ -18,8 +18,6 @@ const BOOKING_CUTOFF_HOUR = 18; // 6:00 PM
 
 const ALL_SLOTS = ['10:00am', '11:00am', '12:00pm', '2:00pm', '3:00pm', '4:00pm', '5:00pm'];
 
-// ─── Slot Utilities ────────────────────────────────────────────────────────────
-
 function slotToMinutes(slot) {
   const isPM = slot.includes('pm');
   const isAM = slot.includes('am');
@@ -78,19 +76,20 @@ async function getNextAvailableSlot() {
   const bookingDate = getBookingDate();
   const dateStr = getDateStr(bookingDate);
   const bookedSlots = await getBookedSlotsFromSheet(dateStr);
+  // After cutoff: use ALL_SLOTS for tomorrow (no time filtering)
+  // Before cutoff: filter out slots too close to now
   const candidateSlots = isAfterCutoff() ? ALL_SLOTS : getAvailableSlotsForToday();
   const nextSlot = candidateSlots.find(slot => !bookedSlots.includes(slot.toLowerCase()));
   return { slot: nextSlot || null, dateStr };
 }
 
-// ─── Reminder Utilities ────────────────────────────────────────────────────────
+// ─── Reminder Utilities ───────────────────────────────────────────────────────
 
 function loadAndRescheduleReminders() {
   if (!fs.existsSync(REMINDERS_FILE)) return;
   const reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf8'));
   const now = Date.now();
   const remaining = [];
-
   reminders.forEach(r => {
     const delay = r.reminderTime - now;
     if (delay > 0) {
@@ -101,7 +100,6 @@ function loadAndRescheduleReminders() {
       console.log(`Missed reminder for ${r.booking.name}, skipping`);
     }
   });
-
   fs.writeFileSync(REMINDERS_FILE, JSON.stringify(remaining));
 }
 
@@ -128,15 +126,15 @@ function scheduleReminderAt(booking, reminderTime) {
       await twilioClient.messages.create({
         from: 'whatsapp:' + process.env.TWILIO_WHATSAPP_NUMBER,
         to: booking.phone,
-        body: `Hi ${booking.name}! 👋 Reminder from ${process.env.BUSINESS_NAME || 'Smart Salon'}.
+        body: `Hi ${booking.name}! Reminder from ${process.env.BUSINESS_NAME || 'Smart Salon'}.
 
 Your appointment is in 30 minutes!
-📋 Service: ${booking.service}
-⏰ Time: ${booking.time}
-📍 Date: ${booking.date}
-📍 City: ${booking.city}
+Service: ${booking.service}
+Time: ${booking.time}
+Date: ${booking.date}
+City: ${booking.city}
 
-See you soon! 😊`
+See you soon!`
       });
       console.log(`Reminder sent to ${booking.name}!`);
       removeReminder(booking.phone);
@@ -174,7 +172,7 @@ function scheduleReminder(booking) {
   }
 }
 
-// ─── WhatsApp Route ────────────────────────────────────────────────────────────
+// ─── WhatsApp Route ───────────────────────────────────────────────────────────
 
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
@@ -187,13 +185,24 @@ app.post('/whatsapp', async (req, res) => {
 
   const afterCutoff = isAfterCutoff();
   const { slot: assignedSlot, dateStr: bookingDateStr } = await getNextAvailableSlot();
-  const bookingDateLabel = afterCutoff ? `tomorrow (${bookingDateStr})` : `today (${bookingDateStr})`;
 
+  // Build ironclad slot instructions — no ambiguity for the LLM
   let slotInfo = '';
-  if (!assignedSlot) {
-    slotInfo = `No slots available for ${bookingDateLabel}. Inform the customer politely and ask them to call directly.`;
+  if (afterCutoff) {
+    if (!assignedSlot) {
+      slotInfo = `TODAY IS CLOSED. TOMORROW (${bookingDateStr}) is also fully booked. Tell the customer politely there are no slots available and ask them to call directly. DO NOT offer or mention any slot for today under any circumstances.`;
+    } else {
+      slotInfo = `TODAY IS FULLY CLOSED FOR BOOKINGS. You are booking for TOMORROW (${bookingDateStr}) ONLY.
+Assigned slot: ${assignedSlot} on ${bookingDateStr}.
+NEVER mention today. NEVER offer today. NEVER say "we have an opening today".
+Tell the customer: today's bookings are closed, and their appointment will be TOMORROW at ${assignedSlot}.`;
+    }
   } else {
-    slotInfo = `Next available slot: ${assignedSlot} on ${bookingDateLabel}. Automatically assign this slot — do NOT ask the customer to choose a time.`;
+    if (!assignedSlot) {
+      slotInfo = `No slots available for today (${bookingDateStr}). Tell the customer politely and ask them to call directly.`;
+    } else {
+      slotInfo = `Next available slot: ${assignedSlot} on today (${bookingDateStr}). Assign this automatically — do NOT ask the customer to choose.`;
+    }
   }
 
   try {
@@ -205,12 +214,22 @@ app.post('/whatsapp', async (req, res) => {
           role: 'system',
           content: `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
-Working hours: 10:00am to 5:00pm. Bookings close at 6:00pm each day.
+Working hours: 10:00am to 5:00pm. Bookings close at 6:00pm sharp every day.
 
-SLOT ASSIGNMENT (IMPORTANT):
+==========================
+SLOT ASSIGNMENT — CRITICAL
+==========================
 ${slotInfo}
-
-${afterCutoff ? '⚠️ It is past 6:00 PM. Bookings for today are CLOSED. You are booking for TOMORROW.' : ''}
+${afterCutoff ? `
+===========================
+ABSOLUTE RULE — NO EXCEPTIONS
+===========================
+It is past 6:00 PM. Today is PERMANENTLY CLOSED for bookings.
+- You MUST NOT offer, mention, suggest, or imply any slot for TODAY.
+- You MUST ONLY book for TOMORROW (${bookingDateStr}).
+- If the customer asks about today, say: "Sorry, today's bookings are closed. I can book you for tomorrow."
+- There is NO situation where you book for today. NONE.
+` : ''}
 
 Services and prices:
 - Haircut: Rs 300
@@ -218,24 +237,24 @@ Services and prices:
 - Massage: Rs 800
 - Cleanup: Rs 400
 
-Your job - follow these steps in order:
+Steps to follow in order:
 1. Greet the customer warmly
-2. If after 6pm, inform them today is closed and you are booking for tomorrow
-3. Ask their full name if not mentioned
-4. Ask what service they want if not mentioned
-5. Ask what city or area they are from
-6. Tell them their assigned time slot (do NOT let them pick)
-7. Confirm all details and ask for confirmation
-8. When customer confirms, end your reply with this EXACT line:
+2. ${afterCutoff ? `Immediately tell them: today is closed, you are booking for TOMORROW (${bookingDateStr})` : 'Greet and proceed to collect details'}
+3. Ask for their full name (if not given)
+4. Ask what service they want (if not given)
+5. Ask what city or area they are from (if not given)
+6. Confirm their assigned slot: ${assignedSlot || 'N/A'} on ${bookingDateStr}
+7. Ask for confirmation
+8. On confirmation, end your reply with EXACTLY:
    BOOKING_CONFIRMED: name=CUSTOMERNAME, phone=${from}, service=SERVICENAME, time=TIMESLOT, city=CITYNAME, date=DATESTR
 
-Rules:
+Hard rules:
 - DATESTR must be exactly: ${bookingDateStr}
 - TIMESLOT must be exactly: ${assignedSlot || 'N/A'}
-- Do NOT offer time choices — assign the slot automatically
-- Keep replies short, friendly and clear
-- Reply in the same language the customer uses (Hindi, Telugu or English)
-- Never skip collecting name, service and city`
+- Never let the customer pick a time — assign it
+- Reply in the same language the customer uses (Hindi, Telugu, or English)
+- Never skip collecting name, service, and city
+- Keep replies short and friendly`
         },
         ...conversations[from]
       ]
@@ -263,7 +282,7 @@ Rules:
             date: match[6].trim()
           };
 
-          // Final check — make sure slot is still free
+          // Final safety check — slot must still be free
           const bookedNow = await getBookedSlotsFromSheet(bookingData.date);
           if (bookedNow.includes(bookingData.time.toLowerCase())) {
             res.set('Content-Type', 'text/xml');
@@ -296,13 +315,13 @@ Rules:
   }
 });
 
-// ─── Health Check ──────────────────────────────────────────────────────────────
+// ─── Health Check ─────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => {
-  res.send('Booking bot is running! ✅');
+  res.send('Booking bot is running!');
 });
 
-// ─── Start ─────────────────────────────────────────────────────────────────────
+// ─── Start ────────────────────────────────────────────────────────────────────
 
 loadAndRescheduleReminders();
 
