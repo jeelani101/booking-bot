@@ -2,6 +2,7 @@ const express = require('express');
 const Groq = require('groq-sdk');
 const axios = require('axios');
 const twilio = require('twilio');
+const fs = require('fs');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -11,11 +12,13 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const conversations = {};
+const REMINDERS_FILE = './reminders.json';
+const BOOKING_CUTOFF_HOUR = 18; // 6:00 PM
 
-// All possible slots
 const ALL_SLOTS = ['10:00am', '11:00am', '12:00pm', '2:00pm', '3:00pm', '4:00pm', '5:00pm'];
 
-// Convert slot string to 24h minutes for comparison
+// ─── Slot Utilities ────────────────────────────────────────────────────────────
+
 function slotToMinutes(slot) {
   const isPM = slot.includes('pm');
   const isAM = slot.includes('am');
@@ -26,34 +29,154 @@ function slotToMinutes(slot) {
   return hours * 60 + (minutes || 0);
 }
 
-// Get slots that are still in the future (with 30min buffer)
-function getFutureSlots() {
+function isAfterCutoff() {
+  const now = new Date();
+  return now.getHours() >= BOOKING_CUTOFF_HOUR;
+}
+
+function getBookingDate() {
+  const now = new Date();
+  if (isAfterCutoff()) {
+    // Book for tomorrow
+    const tomorrow = new Date(now);
+    tomorrow.setDate(now.getDate() + 1);
+    return tomorrow;
+  }
+  return now;
+}
+
+function getAvailableSlotsForToday() {
   const now = new Date();
   const currentMinutes = now.getHours() * 60 + now.getMinutes() + 30; // 30min buffer
   return ALL_SLOTS.filter(slot => slotToMinutes(slot) > currentMinutes);
 }
 
-// Fetch already booked slots from Google Sheet for today
-async function getBookedSlots() {
+async function getBookedSlotsFromSheet(dateStr) {
   try {
-    const today = new Date().toLocaleDateString('en-IN');
-    const response = await axios.get(process.env.GOOGLE_SHEET_URL + '?date=' + encodeURIComponent(today));
-    const bookings = response.data; // expects array of { time, date } objects
+    const response = await axios.get(process.env.GOOGLE_SHEET_URL + '?date=' + encodeURIComponent(dateStr));
+    const bookings = response.data;
+    if (!Array.isArray(bookings)) return [];
     return bookings
-      .filter(b => b.date === today)
+      .filter(b => b.date === dateStr)
       .map(b => b.time.toLowerCase().trim());
   } catch (err) {
     console.error('Could not fetch booked slots:', err.message);
-    return []; // If fetch fails, assume no bookings (fail open)
+    return [];
   }
 }
 
-// Get available slots = future slots minus booked ones
-async function getAvailableSlots() {
-  const future = getFutureSlots();
-  const booked = await getBookedSlots();
-  return future.filter(slot => !booked.includes(slot.toLowerCase()));
+// Returns the next available slot for the booking date (first-come-first-served)
+async function getNextAvailableSlot() {
+  const bookingDate = getBookingDate();
+  const dateStr = bookingDate.toLocaleDateString('en-IN');
+  const bookedSlots = await getBookedSlotsFromSheet(dateStr);
+
+  let candidateSlots = ALL_SLOTS;
+
+  // If booking is for today (not after cutoff), filter past slots
+  if (!isAfterCutoff()) {
+    candidateSlots = getAvailableSlotsForToday();
+  }
+
+  // Return first slot not already booked
+  const nextSlot = candidateSlots.find(slot => !bookedSlots.includes(slot.toLowerCase()));
+  return { slot: nextSlot || null, dateStr };
 }
+
+// ─── Reminder Utilities ────────────────────────────────────────────────────────
+
+function loadAndRescheduleReminders() {
+  if (!fs.existsSync(REMINDERS_FILE)) return;
+  const reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf8'));
+  const now = Date.now();
+  const remaining = [];
+
+  reminders.forEach(r => {
+    const delay = r.reminderTime - now;
+    if (delay > 0) {
+      console.log(`Re-scheduling reminder for ${r.booking.name} in ${Math.round(delay / 60000)} mins`);
+      remaining.push(r);
+      scheduleReminderAt(r.booking, r.reminderTime);
+    } else {
+      console.log(`Missed reminder for ${r.booking.name}, skipping`);
+    }
+  });
+
+  fs.writeFileSync(REMINDERS_FILE, JSON.stringify(remaining));
+}
+
+function saveReminder(booking, reminderTime) {
+  let reminders = [];
+  if (fs.existsSync(REMINDERS_FILE)) {
+    reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf8'));
+  }
+  reminders.push({ booking, reminderTime });
+  fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders));
+}
+
+function removeReminder(phone) {
+  if (!fs.existsSync(REMINDERS_FILE)) return;
+  let reminders = JSON.parse(fs.readFileSync(REMINDERS_FILE, 'utf8'));
+  reminders = reminders.filter(r => r.booking.phone !== phone);
+  fs.writeFileSync(REMINDERS_FILE, JSON.stringify(reminders));
+}
+
+function scheduleReminderAt(booking, reminderTime) {
+  const delay = reminderTime - Date.now();
+  setTimeout(async () => {
+    try {
+      await twilioClient.messages.create({
+        from: 'whatsapp:' + process.env.TWILIO_WHATSAPP_NUMBER,
+        to: booking.phone,
+        body: `Hi ${booking.name}! 👋 Reminder from ${process.env.BUSINESS_NAME || 'Smart Salon'}.
+
+Your appointment is in 30 minutes!
+📋 Service: ${booking.service}
+⏰ Time: ${booking.time}
+📍 Date: ${booking.date}
+📍 City: ${booking.city}
+
+See you soon! 😊`
+      });
+      console.log(`Reminder sent to ${booking.name}!`);
+      removeReminder(booking.phone);
+    } catch (err) {
+      console.error('Reminder error:', err.message);
+    }
+  }, delay);
+}
+
+function scheduleReminder(booking) {
+  try {
+    // Parse date from booking (en-IN format: dd/mm/yyyy)
+    const [day, month, year] = booking.date.split('/').map(Number);
+    const slot = booking.time.toLowerCase();
+    const isPM = slot.includes('pm');
+    const isAM = slot.includes('am');
+    const time = slot.replace('am', '').replace('pm', '').trim();
+    let [hours, minutes] = time.includes(':') ? time.split(':').map(Number) : [parseInt(time), 0];
+    if (isPM && hours !== 12) hours += 12;
+    if (isAM && hours === 12) hours = 0;
+
+    const appointmentTime = new Date(year, month - 1, day, hours, minutes || 0, 0, 0);
+    const reminderTime = appointmentTime.getTime() - 30 * 60 * 1000;
+    const delay = reminderTime - Date.now();
+
+    if (delay <= 0) {
+      console.log('Too soon for a 30-min reminder');
+      return;
+    }
+
+    saveReminder(booking, reminderTime);
+    scheduleReminderAt(booking, reminderTime);
+    console.log(`Reminder scheduled for ${booking.name} on ${booking.date} at ${booking.time}`);
+
+  } catch (err) {
+    console.error('Schedule error:', err.message);
+  }
+}
+
+// ─── WhatsApp Route ────────────────────────────────────────────────────────────
 
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
@@ -64,11 +187,18 @@ app.post('/whatsapp', async (req, res) => {
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMsg });
 
-  // Get real-time available slots
-  const availableSlots = await getAvailableSlots();
-  const slotsText = availableSlots.length > 0
-    ? availableSlots.join(', ')
-    : 'No slots available for today';
+  // Check cutoff and get next available slot
+  const afterCutoff = isAfterCutoff();
+  const { slot: assignedSlot, dateStr: bookingDateStr } = await getNextAvailableSlot();
+
+  const bookingDateLabel = afterCutoff ? `tomorrow (${bookingDateStr})` : `today (${bookingDateStr})`;
+
+  let slotInfo = '';
+  if (!assignedSlot) {
+    slotInfo = `No slots available for ${bookingDateLabel}. Inform the customer politely and ask them to call directly.`;
+  } else {
+    slotInfo = `Next available slot: ${assignedSlot} on ${bookingDateLabel}. This slot will be automatically assigned to the customer — do NOT ask them to choose a time.`;
+  }
 
   try {
     const response = await groq.chat.completions.create({
@@ -79,12 +209,12 @@ app.post('/whatsapp', async (req, res) => {
           role: 'system',
           content: `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
+Working hours: 10:00am to 5:00pm. Bookings close at 6:00pm each day.
 
-Available slots for TODAY (already filtered - past and booked slots removed):
-${slotsText}
+SLOT ASSIGNMENT (IMPORTANT):
+${slotInfo}
 
-IMPORTANT: Only offer slots from the list above. Do NOT suggest any other times.
-If no slots are available, politely inform the customer and ask them to call directly.
+${afterCutoff ? '⚠️ It is past 6:00 PM. Bookings for today are CLOSED. You are booking for TOMORROW.' : ''}
 
 Services and prices:
 - Haircut: Rs 300
@@ -94,20 +224,22 @@ Services and prices:
 
 Your job - follow these steps in order:
 1. Greet the customer warmly
-2. Ask their full name if not mentioned
-3. Ask what service they want if not mentioned
-4. Ask what city or area they are from
-5. Show available slots and ask which they prefer
-6. Confirm all details back to customer
-7. When customer confirms, end your reply with this EXACT line (fill in real values):
-   BOOKING_CONFIRMED: name=CUSTOMERNAME, phone=${from}, service=SERVICENAME, time=TIMESLOT, city=CITYNAME
+2. If it is after 6pm, inform them today's bookings are closed and you are booking for tomorrow
+3. Ask their full name if not mentioned
+4. Ask what service they want if not mentioned
+5. Ask what city or area they are from
+6. Tell them their assigned time slot (do NOT let them pick — slots are first-come-first-served)
+7. Confirm all details and ask for confirmation
+8. When customer confirms, end your reply with this EXACT line:
+   BOOKING_CONFIRMED: name=CUSTOMERNAME, phone=${from}, service=SERVICENAME, time=TIMESLOT, city=CITYNAME, date=DATESTR
 
-Important rules:
-- Collect name, service, city and time BEFORE confirming
-- Only accept a time slot from the available list above
+Rules:
+- DATESTR must be exactly: ${bookingDateStr}
+- TIMESLOT must be exactly: ${assignedSlot || 'N/A'}
+- Do NOT offer time choices — assign the slot automatically
 - Keep replies short, friendly and clear
 - Reply in the same language the customer uses (Hindi, Telugu or English)
-- Never skip collecting name and city`
+- Never skip collecting name, service and city`
         },
         ...conversations[from]
       ]
@@ -117,7 +249,7 @@ Important rules:
     conversations[from].push({ role: 'assistant', content: reply });
 
     if (reply.includes('BOOKING_CONFIRMED:')) {
-      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=([^,]+), city=(.+)/);
+      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=([^,]+), city=([^,]+), date=(.+)/);
       if (match) {
         const bookingData = {
           name: match[1].trim(),
@@ -125,19 +257,14 @@ Important rules:
           service: match[3].trim(),
           time: match[4].trim(),
           city: match[5].trim(),
-          date: new Date().toLocaleDateString('en-IN')
+          date: match[6].trim()
         };
 
-        // Double-check slot is still available before saving
-        const stillAvailable = await getAvailableSlots();
-        const requestedSlot = bookingData.time.toLowerCase().trim();
-        const isValid = stillAvailable.some(s => s.toLowerCase() === requestedSlot);
-
-        if (!isValid) {
-          // Slot was taken between conversation start and confirmation
+        // Final check — make sure slot is still free
+        const bookedNow = await getBookedSlotsFromSheet(bookingData.date);
+        if (bookedNow.includes(bookingData.time.toLowerCase())) {
           res.set('Content-Type', 'text/xml');
-          res.send(`<Response><Message>Sorry! That slot just got booked by someone else. Please type anything to see updated available slots and choose again.</Message></Response>`);
-          // Reset last few messages so user can re-pick
+          res.send(`<Response><Message>Sorry! That slot was just taken. Please send any message to get a new slot.</Message></Response>`);
           conversations[from] = conversations[from].slice(0, -2);
           return;
         }
@@ -146,7 +273,7 @@ Important rules:
           .catch(err => console.error('Sheets error:', err.message));
 
         scheduleReminder(bookingData);
-        console.log('Booking saved and reminder scheduled!');
+        console.log(`Booking saved: ${bookingData.name} on ${bookingData.date} at ${bookingData.time}`);
       }
     }
 
@@ -159,62 +286,19 @@ Important rules:
   } catch (error) {
     console.error('Error:', error);
     res.set('Content-Type', 'text/xml');
-    res.send(`<Response><Message>Sorry, I am having trouble right now. Please call us directly to book.</Message></Response>`);
+    res.send(`<Response><Message>Sorry, I am having trouble right now. Please call us directly.</Message></Response>`);
   }
 });
 
-function scheduleReminder(booking) {
-  try {
-    const slot = booking.time.toLowerCase();
-    const isPM = slot.includes('pm');
-    const isAM = slot.includes('am');
-    const time = slot.replace('am', '').replace('pm', '').trim();
-    let [hours, minutes] = time.includes(':') ? time.split(':').map(Number) : [parseInt(time), 0];
-    if (isPM && hours !== 12) hours += 12;
-    if (isAM && hours === 12) hours = 0;
-
-    const now = new Date();
-    const appointmentTime = new Date();
-    appointmentTime.setHours(hours, minutes || 0, 0, 0);
-
-    const reminderTime = new Date(appointmentTime.getTime() - 30 * 60 * 1000);
-    const delay = reminderTime.getTime() - now.getTime();
-
-    if (delay <= 0) {
-      console.log('Appointment is too soon for a 30-min reminder');
-      return;
-    }
-
-    console.log(`Reminder scheduled for ${booking.name} in ${Math.round(delay / 60000)} minutes`);
-
-    setTimeout(async () => {
-      try {
-        await twilioClient.messages.create({
-          from: 'whatsapp:' + process.env.TWILIO_WHATSAPP_NUMBER,
-          to: booking.phone,
-          body: `Hi ${booking.name}! 👋 This is a reminder from ${process.env.BUSINESS_NAME || 'Smart Salon'}.
-
-Your appointment is in 30 minutes!
-📋 Service: ${booking.service}
-⏰ Time: ${booking.time}
-📍 City: ${booking.city}
-
-See you soon! 😊`
-        });
-        console.log(`Reminder sent to ${booking.name}!`);
-      } catch (err) {
-        console.error('Reminder error:', err.message);
-      }
-    }, delay);
-
-  } catch (err) {
-    console.error('Schedule error:', err.message);
-  }
-}
+// ─── Health Check ──────────────────────────────────────────────────────────────
 
 app.get('/', (req, res) => {
   res.send('Booking bot is running! ✅');
 });
+
+// ─── Start ─────────────────────────────────────────────────────────────────────
+
+loadAndRescheduleReminders();
 
 const PORT = process.env.PORT || 8080;
 app.listen(PORT, '0.0.0.0', () => {
