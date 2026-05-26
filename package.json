@@ -1,13 +1,10 @@
 {
   "name": "booking-bot",
   "version": "1.0.0",
-  "description": "AI Appointment Booking Bot",
   "main": "index.js",
-  "scripts": {
-    "start": "node index.js"
-  },
+  "scripts": { "start": "node index.js" },
   "dependencies": {
     "express": "^4.18.2",
-    "axios": "^1.6.0"
+    "groq-sdk": "^0.3.0"
   }
 }
