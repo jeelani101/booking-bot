@@ -1,13 +1,12 @@
 const express = require('express');
-const Anthropic = require('@anthropic-ai/sdk');
+const { GoogleGenerativeAI } = require('@google/generative-ai');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
-const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY });
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-// WhatsApp webhook
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
   const from = req.body.From;
@@ -15,10 +14,9 @@ app.post('/whatsapp', async (req, res) => {
   console.log(`Message from ${from}: ${userMsg}`);
 
   try {
-    const response = await client.messages.create({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 300,
-      system: `You are a friendly appointment booking assistant.
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash' });
+
+    const prompt = `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
 Available slots today: 10am, 11am, 12pm, 2pm, 3pm, 4pm, 5pm
 Services and prices:
@@ -35,11 +33,13 @@ Your job:
 5. Tell them they will get a reminder 1 hour before
 
 Keep replies short, friendly and clear.
-If asked anything unrelated to booking, politely redirect to booking.`,
-      messages: [{ role: 'user', content: userMsg }]
-    });
+Reply in the same language the customer uses (Hindi, Telugu or English).
 
-    const reply = response.content[0].text;
+Customer message: ${userMsg}`;
+
+    const result = await model.generateContent(prompt);
+    const reply = result.response.text();
+
     console.log(`Bot reply: ${reply}`);
 
     res.set('Content-Type', 'text/xml');
@@ -52,7 +52,6 @@ If asked anything unrelated to booking, politely redirect to booking.`,
   }
 });
 
-// Health check
 app.get('/', (req, res) => {
   res.send('Booking bot is running! ✅');
 });
