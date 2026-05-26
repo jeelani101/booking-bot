@@ -1,5 +1,6 @@
 const express = require('express');
 const Groq = require('groq-sdk');
+const axios = require('axios');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
@@ -7,10 +8,16 @@ app.use(express.json());
 
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 
+const conversations = {};
+
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
   const from = req.body.From;
+
   console.log(`Message from ${from}: ${userMsg}`);
+
+  if (!conversations[from]) conversations[from] = [];
+  conversations[from].push({ role: 'user', content: userMsg });
 
   try {
     const response = await groq.chat.completions.create({
@@ -33,23 +40,37 @@ Your job:
 2. Ask what service they want if not mentioned
 3. Ask what time slot they prefer
 4. Confirm the booking with all details
-5. Tell them they will get a reminder 1 hour before
+5. When booking is confirmed, include this exact line at the end:
+   BOOKING_CONFIRMED: name=Unknown, phone=${from}, service=SERVICE, time=TIME
 
 Keep replies short, friendly and clear.
 Reply in the same language the customer uses.`
         },
-        {
-          role: 'user',
-          content: userMsg
-        }
+        ...conversations[from]
       ]
     });
 
     const reply = response.choices[0].message.content;
-    console.log(`Bot reply: ${reply}`);
+    conversations[from].push({ role: 'assistant', content: reply });
+
+    if (reply.includes('BOOKING_CONFIRMED:')) {
+      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=(.+)/);
+      if (match) {
+        await axios.post(process.env.GOOGLE_SHEET_URL, {
+          name: match[1].trim(),
+          phone: match[2].trim(),
+          service: match[3].trim(),
+          time: match[4].trim(),
+          date: new Date().toLocaleDateString('en-IN')
+        }).catch(err => console.error('Sheets error:', err.message));
+      }
+    }
+
+    const cleanReply = reply.replace(/BOOKING_CONFIRMED:.*/, '').trim();
+    console.log(`Bot reply: ${cleanReply}`);
 
     res.set('Content-Type', 'text/xml');
-    res.send(`<Response><Message>${reply}</Message></Response>`);
+    res.send(`<Response><Message>${cleanReply}</Message></Response>`);
 
   } catch (error) {
     console.error('Error:', error);
