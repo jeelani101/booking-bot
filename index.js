@@ -1,23 +1,25 @@
 const express = require('express');
-const axios = require('axios');
+const Groq = require('groq-sdk');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
 
+const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
   const from = req.body.From;
-
   console.log(`Message from ${from}: ${userMsg}`);
 
   try {
-    const response = await axios.post(
-      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash-lite:generateContent?key=${process.env.GEMINI_API_KEY}`,
-      {
-        contents: [{
-          parts: [{
-            text: `You are a friendly appointment booking assistant for a salon.
+    const response = await groq.chat.completions.create({
+      model: 'llama3-8b-8192',
+      max_tokens: 300,
+      messages: [
+        {
+          role: 'system',
+          content: `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
 Available slots today: 10am, 11am, 12pm, 2pm, 3pm, 4pm, 5pm
 Services and prices:
@@ -34,22 +36,23 @@ Your job:
 5. Tell them they will get a reminder 1 hour before
 
 Keep replies short, friendly and clear.
-Reply in the same language the customer uses.
+Reply in the same language the customer uses.`
+        },
+        {
+          role: 'user',
+          content: userMsg
+        }
+      ]
+    });
 
-Customer message: ${userMsg}`
-          }]
-        }]
-      }
-    );
-
-    const reply = response.data.candidates[0].content.parts[0].text;
+    const reply = response.choices[0].message.content;
     console.log(`Bot reply: ${reply}`);
 
     res.set('Content-Type', 'text/xml');
     res.send(`<Response><Message>${reply}</Message></Response>`);
 
   } catch (error) {
-    console.error('Error:', error.response?.data || error.message);
+    console.error('Error:', error);
     res.set('Content-Type', 'text/xml');
     res.send(`<Response><Message>Sorry, I am having trouble right now. Please call us directly to book.</Message></Response>`);
   }
