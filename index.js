@@ -35,18 +35,21 @@ Services and prices:
 - Massage: Rs 800
 - Cleanup: Rs 400
 
-Your job:
+Your job - follow these steps in order:
 1. Greet the customer warmly
-2. Ask their name if not mentioned
+2. Ask their full name if not mentioned
 3. Ask what service they want if not mentioned
-4. Ask what city or area they are in
+4. Ask what city or area they are from
 5. Ask what time slot they prefer
-6. Confirm the booking with all details
-7. When booking is confirmed, include this exact line at the end:
-   BOOKING_CONFIRMED: name=NAME, phone=PHONE, service=SERVICE, time=TIME, city=CITY
+6. Confirm all details back to customer
+7. When customer confirms, end your reply with this EXACT line (fill in real values):
+   BOOKING_CONFIRMED: name=CUSTOMERNAME, phone=${from}, service=SERVICENAME, time=TIMESLOT, city=CITYNAME
 
-Keep replies short, friendly and clear.
-Reply in the same language the customer uses.`
+Important rules:
+- Collect name, service, city and time BEFORE confirming
+- Keep replies short, friendly and clear
+- Reply in the same language the customer uses (Hindi, Telugu or English)
+- Never skip collecting name and city`
         },
         ...conversations[from]
       ]
@@ -56,19 +59,21 @@ Reply in the same language the customer uses.`
     conversations[from].push({ role: 'assistant', content: reply });
 
     if (reply.includes('BOOKING_CONFIRMED:')) {
-      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=(.+)/);
+      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=([^,]+), city=(.+)/);
       if (match) {
         await axios.post(process.env.GOOGLE_SHEET_URL, {
           name: match[1].trim(),
           phone: match[2].trim(),
           service: match[3].trim(),
           time: match[4].trim(),
+          city: match[5].trim(),
           date: new Date().toLocaleDateString('en-IN')
         }).catch(err => console.error('Sheets error:', err.message));
+        console.log('Booking saved to Google Sheets!');
       }
     }
 
-    const cleanReply = reply.replace(/BOOKING_CONFIRMED:.*/, '').trim();
+    const cleanReply = reply.replace(/BOOKING_CONFIRMED:.*$/m, '').trim();
     console.log(`Bot reply: ${cleanReply}`);
 
     res.set('Content-Type', 'text/xml');
