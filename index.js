@@ -18,6 +18,18 @@ const BOOKING_CUTOFF_HOUR = 18; // 6:00 PM
 
 const ALL_SLOTS = ['10:00am', '11:00am', '12:00pm', '2:00pm', '3:00pm', '4:00pm', '5:00pm'];
 
+// ─── XML Escape (FIXES WhatsApp not receiving messages) ───────────────────────
+function escapeXml(str) {
+  return str
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+// ─── Slot Utilities ───────────────────────────────────────────────────────────
+
 function slotToMinutes(slot) {
   const isPM = slot.includes('pm');
   const isAM = slot.includes('am');
@@ -201,7 +213,7 @@ Tell the customer: today's bookings are closed, and their appointment will be TO
     if (!assignedSlot) {
       slotInfo = `No slots available for today (${bookingDateStr}). Tell the customer politely and ask them to call directly.`;
     } else {
-      slotInfo = `Next available slot: ${assignedSlot} on today (${bookingDateStr}). Assign this automatically — do NOT ask the customer to choose.`;
+      slotInfo = `Next available slot: ${assignedSlot} on today (${bookingDateStr}). Assign this automatically - do NOT ask the customer to choose.`;
     }
   }
 
@@ -217,12 +229,12 @@ Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
 Working hours: 10:00am to 5:00pm. Bookings close at 6:00pm sharp every day.
 
 ==========================
-SLOT ASSIGNMENT — CRITICAL
+SLOT ASSIGNMENT - CRITICAL
 ==========================
 ${slotInfo}
 ${afterCutoff ? `
 ===========================
-ABSOLUTE RULE — NO EXCEPTIONS
+ABSOLUTE RULE - NO EXCEPTIONS
 ===========================
 It is past 6:00 PM. Today is PERMANENTLY CLOSED for bookings.
 - You MUST NOT offer, mention, suggest, or imply any slot for TODAY.
@@ -251,10 +263,11 @@ Steps to follow in order:
 Hard rules:
 - DATESTR must be exactly: ${bookingDateStr}
 - TIMESLOT must be exactly: ${assignedSlot || 'N/A'}
-- Never let the customer pick a time — assign it
+- Never let the customer pick a time - assign it
 - Reply in the same language the customer uses (Hindi, Telugu, or English)
 - Never skip collecting name, service, and city
-- Keep replies short and friendly`
+- Keep replies short and friendly
+- Do NOT use special characters like &, <, > in your replies`
         },
         ...conversations[from]
       ]
@@ -306,7 +319,9 @@ Hard rules:
     console.log(`Bot reply: ${cleanReply}`);
 
     res.set('Content-Type', 'text/xml');
-    res.send(`<Response><Message>${cleanReply}</Message></Response>`);
+    // escapeXml() fixes special characters (&, <, >, etc.) that break TwiML XML
+    // and cause WhatsApp to silently drop the message
+    res.send(`<Response><Message>${escapeXml(cleanReply)}</Message></Response>`);
 
   } catch (error) {
     console.error('Error:', error);
