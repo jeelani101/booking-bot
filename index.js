@@ -12,6 +12,7 @@ const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const twilioClient = twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
 const conversations = {};
+const pendingBookings = new Set();
 const REMINDERS_FILE = './reminders.json';
 const BOOKING_CUTOFF_HOUR = 18; // 6:00 PM
 
@@ -37,7 +38,6 @@ function isAfterCutoff() {
 function getBookingDate() {
   const now = new Date();
   if (isAfterCutoff()) {
-    // Book for tomorrow
     const tomorrow = new Date(now);
     tomorrow.setDate(now.getDate() + 1);
     return tomorrow;
@@ -45,15 +45,24 @@ function getBookingDate() {
   return now;
 }
 
+function getDateStr(dateObj) {
+  const day = dateObj.getDate().toString().padStart(2, '0');
+  const month = (dateObj.getMonth() + 1).toString().padStart(2, '0');
+  const year = dateObj.getFullYear();
+  return `${day}/${month}/${year}`;
+}
+
 function getAvailableSlotsForToday() {
   const now = new Date();
-  const currentMinutes = now.getHours() * 60 + now.getMinutes() + 30; // 30min buffer
+  const currentMinutes = now.getHours() * 60 + now.getMinutes() + 30;
   return ALL_SLOTS.filter(slot => slotToMinutes(slot) > currentMinutes);
 }
 
 async function getBookedSlotsFromSheet(dateStr) {
   try {
-    const response = await axios.get(process.env.GOOGLE_SHEET_URL + '?date=' + encodeURIComponent(dateStr));
+    const response = await axios.get(
+      process.env.GOOGLE_SHEET_URL + '?date=' + encodeURIComponent(dateStr)
+    );
     const bookings = response.data;
     if (!Array.isArray(bookings)) return [];
     return bookings
@@ -65,20 +74,11 @@ async function getBookedSlotsFromSheet(dateStr) {
   }
 }
 
-// Returns the next available slot for the booking date (first-come-first-served)
 async function getNextAvailableSlot() {
   const bookingDate = getBookingDate();
-  const dateStr = bookingDate.toLocaleDateString('en-IN');
+  const dateStr = getDateStr(bookingDate);
   const bookedSlots = await getBookedSlotsFromSheet(dateStr);
-
-  let candidateSlots = ALL_SLOTS;
-
-  // If booking is for today (not after cutoff), filter past slots
-  if (!isAfterCutoff()) {
-    candidateSlots = getAvailableSlotsForToday();
-  }
-
-  // Return first slot not already booked
+  const candidateSlots = isAfterCutoff() ? ALL_SLOTS : getAvailableSlotsForToday();
   const nextSlot = candidateSlots.find(slot => !bookedSlots.includes(slot.toLowerCase()));
   return { slot: nextSlot || null, dateStr };
 }
@@ -148,7 +148,6 @@ See you soon! 😊`
 
 function scheduleReminder(booking) {
   try {
-    // Parse date from booking (en-IN format: dd/mm/yyyy)
     const [day, month, year] = booking.date.split('/').map(Number);
     const slot = booking.time.toLowerCase();
     const isPM = slot.includes('pm');
@@ -170,7 +169,6 @@ function scheduleReminder(booking) {
     saveReminder(booking, reminderTime);
     scheduleReminderAt(booking, reminderTime);
     console.log(`Reminder scheduled for ${booking.name} on ${booking.date} at ${booking.time}`);
-
   } catch (err) {
     console.error('Schedule error:', err.message);
   }
@@ -187,17 +185,15 @@ app.post('/whatsapp', async (req, res) => {
   if (!conversations[from]) conversations[from] = [];
   conversations[from].push({ role: 'user', content: userMsg });
 
-  // Check cutoff and get next available slot
   const afterCutoff = isAfterCutoff();
   const { slot: assignedSlot, dateStr: bookingDateStr } = await getNextAvailableSlot();
-
   const bookingDateLabel = afterCutoff ? `tomorrow (${bookingDateStr})` : `today (${bookingDateStr})`;
 
   let slotInfo = '';
   if (!assignedSlot) {
     slotInfo = `No slots available for ${bookingDateLabel}. Inform the customer politely and ask them to call directly.`;
   } else {
-    slotInfo = `Next available slot: ${assignedSlot} on ${bookingDateLabel}. This slot will be automatically assigned to the customer — do NOT ask them to choose a time.`;
+    slotInfo = `Next available slot: ${assignedSlot} on ${bookingDateLabel}. Automatically assign this slot — do NOT ask the customer to choose a time.`;
   }
 
   try {
@@ -224,11 +220,11 @@ Services and prices:
 
 Your job - follow these steps in order:
 1. Greet the customer warmly
-2. If it is after 6pm, inform them today's bookings are closed and you are booking for tomorrow
+2. If after 6pm, inform them today is closed and you are booking for tomorrow
 3. Ask their full name if not mentioned
 4. Ask what service they want if not mentioned
 5. Ask what city or area they are from
-6. Tell them their assigned time slot (do NOT let them pick — slots are first-come-first-served)
+6. Tell them their assigned time slot (do NOT let them pick)
 7. Confirm all details and ask for confirmation
 8. When customer confirms, end your reply with this EXACT line:
    BOOKING_CONFIRMED: name=CUSTOMERNAME, phone=${from}, service=SERVICENAME, time=TIMESLOT, city=CITYNAME, date=DATESTR
@@ -249,31 +245,41 @@ Rules:
     conversations[from].push({ role: 'assistant', content: reply });
 
     if (reply.includes('BOOKING_CONFIRMED:')) {
-      const match = reply.match(/BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=([^,]+), city=([^,]+), date=(.+)/);
+      const match = reply.match(
+        /BOOKING_CONFIRMED: name=([^,]+), phone=([^,]+), service=([^,]+), time=([^,]+), city=([^,]+), date=(.+)/
+      );
       if (match) {
-        const bookingData = {
-          name: match[1].trim(),
-          phone: match[2].trim(),
-          service: match[3].trim(),
-          time: match[4].trim(),
-          city: match[5].trim(),
-          date: match[6].trim()
-        };
+        const bookingKey = `${from}_${match[4].trim()}_${match[6].trim()}`;
 
-        // Final check — make sure slot is still free
-        const bookedNow = await getBookedSlotsFromSheet(bookingData.date);
-        if (bookedNow.includes(bookingData.time.toLowerCase())) {
-          res.set('Content-Type', 'text/xml');
-          res.send(`<Response><Message>Sorry! That slot was just taken. Please send any message to get a new slot.</Message></Response>`);
-          conversations[from] = conversations[from].slice(0, -2);
-          return;
+        if (!pendingBookings.has(bookingKey)) {
+          pendingBookings.add(bookingKey);
+
+          const bookingData = {
+            name: match[1].trim(),
+            phone: match[2].trim(),
+            service: match[3].trim(),
+            time: match[4].trim(),
+            city: match[5].trim(),
+            date: match[6].trim()
+          };
+
+          // Final check — make sure slot is still free
+          const bookedNow = await getBookedSlotsFromSheet(bookingData.date);
+          if (bookedNow.includes(bookingData.time.toLowerCase())) {
+            res.set('Content-Type', 'text/xml');
+            res.send(`<Response><Message>Sorry! That slot was just taken. Send any message to get a new slot.</Message></Response>`);
+            conversations[from] = conversations[from].slice(0, -2);
+            pendingBookings.delete(bookingKey);
+            return;
+          }
+
+          await axios.post(process.env.GOOGLE_SHEET_URL, bookingData)
+            .catch(err => console.error('Sheets error:', err.message));
+
+          scheduleReminder(bookingData);
+          console.log(`Booking saved: ${bookingData.name} on ${bookingData.date} at ${bookingData.time}`);
+          delete conversations[from];
         }
-
-        await axios.post(process.env.GOOGLE_SHEET_URL, bookingData)
-          .catch(err => console.error('Sheets error:', err.message));
-
-        scheduleReminder(bookingData);
-        console.log(`Booking saved: ${bookingData.name} on ${bookingData.date} at ${bookingData.time}`);
       }
     }
 
