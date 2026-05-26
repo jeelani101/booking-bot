@@ -1,11 +1,9 @@
 const express = require('express');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+const axios = require('axios');
 
 const app = express();
 app.use(express.urlencoded({ extended: true }));
 app.use(express.json());
-
-const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 app.post('/whatsapp', async (req, res) => {
   const userMsg = req.body.Body;
@@ -14,9 +12,12 @@ app.post('/whatsapp', async (req, res) => {
   console.log(`Message from ${from}: ${userMsg}`);
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
-
-    const prompt = `You are a friendly appointment booking assistant for a salon.
+    const response = await axios.post(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=${process.env.GEMINI_API_KEY}`,
+      {
+        contents: [{
+          parts: [{
+            text: `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
 Available slots today: 10am, 11am, 12pm, 2pm, 3pm, 4pm, 5pm
 Services and prices:
@@ -33,20 +34,22 @@ Your job:
 5. Tell them they will get a reminder 1 hour before
 
 Keep replies short, friendly and clear.
-Reply in the same language the customer uses (Hindi, Telugu or English).
+Reply in the same language the customer uses.
 
-Customer message: ${userMsg}`;
+Customer message: ${userMsg}`
+          }]
+        }]
+      }
+    );
 
-    const result = await model.generateContent(prompt);
-    const reply = result.response.text();
-
+    const reply = response.data.candidates[0].content.parts[0].text;
     console.log(`Bot reply: ${reply}`);
 
     res.set('Content-Type', 'text/xml');
     res.send(`<Response><Message>${reply}</Message></Response>`);
 
   } catch (error) {
-    console.error('Error:', error);
+    console.error('Error:', error.response?.data || error.message);
     res.set('Content-Type', 'text/xml');
     res.send(`<Response><Message>Sorry, I am having trouble right now. Please call us directly to book.</Message></Response>`);
   }
