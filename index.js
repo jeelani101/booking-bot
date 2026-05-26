@@ -37,11 +37,13 @@ Services and prices:
 
 Your job:
 1. Greet the customer warmly
-2. Ask what service they want if not mentioned
-3. Ask what time slot they prefer
-4. Confirm the booking with all details
-5. When booking is confirmed, include this exact line at the end:
-   BOOKING_CONFIRMED: name=Unknown, phone=${from}, service=SERVICE, time=TIME
+2. Ask their name if not mentioned
+3. Ask what service they want if not mentioned
+4. Ask what city or area they are in
+5. Ask what time slot they prefer
+6. Confirm the booking with all details
+7. When booking is confirmed, include this exact line at the end:
+   BOOKING_CONFIRMED: name=NAME, phone=PHONE, service=SERVICE, time=TIME, city=CITY
 
 Keep replies short, friendly and clear.
 Reply in the same language the customer uses.`
