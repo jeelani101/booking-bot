@@ -14,7 +14,7 @@ app.post('/whatsapp', async (req, res) => {
   console.log(`Message from ${from}: ${userMsg}`);
 
   try {
-    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-8b' });
+    const model = genAI.getGenerativeModel({ model: 'gemini-1.5-flash-latest' });
 
     const prompt = `You are a friendly appointment booking assistant for a salon.
 Business name: ${process.env.BUSINESS_NAME || 'Smart Salon'}
